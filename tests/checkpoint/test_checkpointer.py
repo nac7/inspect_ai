@@ -149,8 +149,10 @@ class _CountingCheckpointer(_EnteredCheckpointer):
 
     fire_count: int = 0
 
-    async def _fire(self, trigger: CheckpointTriggerKind) -> None:
-        await super()._fire(trigger)
+    async def _fire(
+        self, trigger: CheckpointTriggerKind, *, final: bool = False
+    ) -> None:
+        await super()._fire(trigger, final=final)
         self.fire_count += 1
 
     async def _backup_host(self, checkpoint_id: int) -> ResticBackupSummary:
@@ -200,7 +202,9 @@ class _FlakyCheckpointer(_EnteredCheckpointer):
     should_fail: bool = False
     attempts: int = 0
 
-    async def _fire_once(self, trigger: CheckpointTriggerKind) -> None:
+    async def _fire_once(
+        self, trigger: CheckpointTriggerKind, *, final: bool = False
+    ) -> None:
         self.attempts += 1
         if self.should_fail:
             raise _FlakyError("boom")
@@ -653,7 +657,7 @@ async def test_checkpointer_raises_without_active_sample() -> None:
 # === e2e: outer facade through to disk =====================================
 
 
-async def test_fire_writes_restic_config_and_checkpoint_files(
+async def test_fire_writes_sample_manifest_and_checkpoint_files(
     active_sample: _FakeActiveSample, tmp_path: Path
 ) -> None:
     """Driving the outer checkpointer end-to-end writes destination + working tree."""
@@ -683,9 +687,24 @@ async def test_fire_writes_restic_config_and_checkpoint_files(
     log = Path(active_sample.log_location)
     eval_dir = log.parent / f"{log.stem}.checkpoints"
     sample_dir = eval_dir / "s7__2"
-    assert (sample_dir / "restic" / "restic-config.json").is_file()
+    assert (sample_dir / "sample.json").is_file()
     checkpoint_files = sorted(p.name for p in sample_dir.glob("ckpt-*.json"))
-    assert checkpoint_files == ["ckpt-00001.json", "ckpt-00002.json"]
+    # Clean cm exit (no exception, attempt != RETRY_FOR_SCORING) triggers
+    # the forced final "agent_complete" fire — so we get one more
+    # checkpoint than the two policy-driven ones.
+    assert checkpoint_files == [
+        "ckpt-00001.json",
+        "ckpt-00002.json",
+        "ckpt-00003.json",
+    ]
+    # And the manifest has solver_done set.
+    from inspect_ai.util._checkpoint._layout.schemas import SampleManifest
+
+    manifest = SampleManifest.model_validate_json(
+        (sample_dir / "sample.json").read_text()
+    )
+    assert manifest.solver_done is not None
+    assert manifest.solver_done.checkpoint_id == 3
 
     # Local destination → sample root is the sample checkpoints dir
     # itself; the `context/` subdir holds host context files.
@@ -871,19 +890,31 @@ def test_track_noop_session() -> None:
     assert out == 0
 
 
-def test_is_resuming_noop_false() -> None:
-    assert _NoopCheckpointer().is_resuming is False
+def test_attempt_noop_initial() -> None:
+    from inspect_ai.util._checkpoint.checkpointer import Attempt
+
+    assert _NoopCheckpointer().attempt is Attempt.INITIAL
 
 
-def test_is_resuming_reflects_resume_checkpoint() -> None:
-    from inspect_ai.util._checkpoint.checkpointer import ResumeCheckpoint
+def test_attempt_reflects_resume_checkpoint() -> None:
+    from inspect_ai.util._checkpoint.checkpointer import Attempt, ResumeCheckpoint
 
-    assert _make_cp().is_resuming is False
+    assert _make_cp().attempt is Attempt.INITIAL
     assert (
         _make_cp(
-            resume_checkpoint=ResumeCheckpoint(sample_checkpoints_dir="/x"),
-        ).is_resuming
-        is True
+            resume_checkpoint=ResumeCheckpoint(
+                sample_checkpoints_dir="/x", attempt=Attempt.RETRY
+            ),
+        ).attempt
+        is Attempt.RETRY
+    )
+    assert (
+        _make_cp(
+            resume_checkpoint=ResumeCheckpoint(
+                sample_checkpoints_dir="/x", attempt=Attempt.RETRY_FOR_SCORING
+            ),
+        ).attempt
+        is Attempt.RETRY_FOR_SCORING
     )
 
 
@@ -915,9 +946,9 @@ async def test_setup_aenter_defers_io_setup(tmp_path: Path) -> None:
             new=AsyncMock(return_value=f"{sample_ckpt_path}/context"),
         ) as ensure_ctx,
         patch(
-            "inspect_ai.util._checkpoint.hydrate.ensure_restic_config",
+            "inspect_ai.util._checkpoint.hydrate.ensure_sample_manifest",
             new=AsyncMock(return_value=fake_sample_state),
-        ) as ensure_restic_config_mock,
+        ) as ensure_manifest_mock,
         patch(
             "inspect_ai.util._checkpoint.hydrate.resolve_restic",
             new=AsyncMock(return_value=Path("/fake/restic")),
@@ -943,7 +974,7 @@ async def test_setup_aenter_defers_io_setup(tmp_path: Path) -> None:
         for m in (
             ensure_ckpt,
             ensure_ctx,
-            ensure_restic_config_mock,
+            ensure_manifest_mock,
             resolve,
             init_host,
             get_sandbox,
@@ -957,7 +988,7 @@ async def test_setup_aenter_defers_io_setup(tmp_path: Path) -> None:
             # __aenter__ ran every I/O step exactly once
             ensure_ckpt.assert_awaited_once()
             ensure_ctx.assert_awaited_once()
-            ensure_restic_config_mock.assert_awaited_once()
+            ensure_manifest_mock.assert_awaited_once()
             resolve.assert_awaited_once()
             init_host.assert_awaited_once()
             get_sandbox.assert_called_once_with("web")

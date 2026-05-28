@@ -36,7 +36,7 @@ async def test_host_egress_roundtrip_to_s3(tmp_path: Path, mock_s3: None) -> Non
         staging / "restic" / "sandboxes" / "default" / "data" / "ab" / "cd",
         b"sb-pack",
     )
-    _write(staging / "restic" / "restic-config.json", b'{"restic_password":"pwd"}')
+    _write(staging / "sample.json", b'{"restic_password":"pwd"}')
     _write(staging / "ckpt-00001.json", b'{"checkpoint_id":1}')
     # Should be excluded:
     _write(staging / "context" / "events.json", b"events")
@@ -59,10 +59,7 @@ async def test_host_egress_roundtrip_to_s3(tmp_path: Path, mock_s3: None) -> Non
             await fs.read_file(f"{dest}/restic/sandboxes/default/data/ab/cd")
             == b"sb-pack"
         )
-        assert (
-            await fs.read_file(f"{dest}/restic/restic-config.json")
-            == b'{"restic_password":"pwd"}'
-        )
+        assert await fs.read_file(f"{dest}/sample.json") == b'{"restic_password":"pwd"}'
         assert await fs.read_file(f"{dest}/ckpt-00001.json") == b'{"checkpoint_id":1}'
 
         # Context subdir must not have been shipped.

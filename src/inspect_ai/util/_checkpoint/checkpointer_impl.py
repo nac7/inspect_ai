@@ -41,10 +41,11 @@ from inspect_ai.util._sandbox.context import sandbox
 from inspect_ai.util._span import span
 from inspect_ai.util._store import Store, store_jsonable
 
-from ._host_egress import host_egress
+from ._host_egress import host_egress, ship_sample_manifest
 from ._layout import host_context
 from ._layout.sample_checkpoints_dir import (
     _list_checkpoint_ids,
+    mark_solver_done,
     write_checkpoint_file,
 )
 from ._layout.schemas import Checkpoint, SnapshotDetails
@@ -52,6 +53,7 @@ from ._layout.staging_dir import sandbox_repo_dir
 from ._sandbox_restic import egress_sandbox, run_sandbox_backup
 from ._triggers import CheckpointTriggerKind, create_trigger
 from .checkpointer import (
+    Attempt,
     Checkpointer,
     ResumeCheckpoint,
 )
@@ -103,6 +105,12 @@ class _CheckpointerSetup(AbstractAsyncContextManager[Checkpointer]):
         self._epoch = epoch
         self._resume_checkpoint = resume_checkpoint
         self._cached: _EnteredCheckpointer | None = None
+        # One-shot finalize gate. The first clean cm exit fires the
+        # "agent_complete" checkpoint and marks ``solver_done`` on the
+        # sample manifest; subsequent ``__aexit__`` calls (e.g. a hook
+        # re-entering ``checkpointer()`` after the agent returned) are
+        # no-ops.
+        self._finalized = False
 
     async def __aenter__(self) -> Checkpointer:
         if self._cached is not None:
@@ -121,8 +129,52 @@ class _CheckpointerSetup(AbstractAsyncContextManager[Checkpointer]):
         )
         return self._cached
 
-    async def __aexit__(self, *exc: object) -> None:
-        return None
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
+        # Fire a final "agent_complete" checkpoint and mark
+        # ``solver_done`` on the sample manifest iff:
+        #
+        # - the cm was actually entered (hydrate ran),
+        # - no exception is propagating through the exit (agent didn't
+        #   raise / cancel / hit a limit),
+        # - this isn't the scoring-phase resume short-circuit (the
+        #   inherited manifest already carries solver_done from the
+        #   prior attempt), and
+        # - we haven't already finalized (idempotent across multiple
+        #   ``async with checkpointer():`` blocks in the same sample).
+        if (
+            self._cached is None
+            or exc_type is not None
+            or self._cached.attempt == Attempt.RETRY_FOR_SCORING
+            or self._finalized
+        ):
+            return
+        self._finalized = True
+        cp = self._cached
+        await cp._fire("agent_complete", final=True)
+        # Only mark solver_done if the forced fire actually succeeded —
+        # `_fire` swallows tolerated failures by default (working.md
+        # §8d). A tolerated failure leaves _consecutive_failures > 0
+        # and the latest snapshot doesn't reflect the agent's final
+        # state, so we don't want scoring-phase resume on retry.
+        if cp._consecutive_failures != 0:
+            return
+        await mark_solver_done(cp._sample_root, cp._last_fired_checkpoint_id)
+        if cp._sample_staging_dir is not None:
+            # Remote destination: the updated sample.json is already in
+            # the egress manifest from the first fire, so the normal
+            # diff would skip it. Re-ship out-of-band, after the final
+            # ckpt has already shipped, so the destination flips to
+            # solver_done set only when the underlying snapshot is
+            # durable.
+            await ship_sample_manifest(
+                staging_dir=cp._sample_staging_dir,
+                destination_dir=cp._sample_checkpoints_dir,
+            )
 
 
 class _EnteredCheckpointer:
@@ -131,7 +183,7 @@ class _EnteredCheckpointer:
     Constructed by :class:`_CheckpointerSetup.__aenter__` once the
     on-disk + sandbox dependencies are in place. No lifecycle methods
     and no Optional state — the agent uses :meth:`tick`,
-    :meth:`checkpoint`, :meth:`track`, and :attr:`is_resuming` directly.
+    :meth:`checkpoint`, :meth:`track`, and :attr:`attempt` directly.
     """
 
     def __init__(
@@ -193,10 +245,15 @@ class _EnteredCheckpointer:
         self._call_pool: list[JsonValue] = list(hydration.host.call_pool)
         self._call_index: dict[str, int] = _build_call_index(self._call_pool)
         self._events_consumed: int | None = None
+        # Set by `_fire_once` on success — the id `mark_solver_done`
+        # writes into the manifest. None until the first successful fire.
+        self._last_fired_checkpoint_id: int = 0
 
     @property
-    def is_resuming(self) -> bool:
-        return self._resume_checkpoint is not None
+    def attempt(self) -> Attempt:
+        if self._resume_checkpoint is None:
+            return Attempt.INITIAL
+        return self._resume_checkpoint.attempt
 
     async def tick(self) -> None:
         self._turn += 1
@@ -283,7 +340,9 @@ class _EnteredCheckpointer:
             return value
         return initial_value
 
-    async def _fire(self, trigger: CheckpointTriggerKind) -> None:
+    async def _fire(
+        self, trigger: CheckpointTriggerKind, *, final: bool = False
+    ) -> None:
         """Fire a checkpoint, enforcing ``max_consecutive_failures``.
 
         Wraps :meth:`_fire_once` so a failed attempt is *non-fatal by
@@ -293,9 +352,14 @@ class _EnteredCheckpointer:
         (N+1)th consecutive failure, ``0`` = any failure is fatal. A
         successful fire resets the count. On breach we re-raise so the
         sample fails through inspect's normal sample-error machinery.
+
+        ``final=True`` signals this is the harness-driven
+        "agent_complete" fire at solver exit — :meth:`_fire_once`
+        skips opening the next checkpoint span (no more agent work
+        will land in it).
         """
         try:
-            await self._fire_once(trigger)
+            await self._fire_once(trigger, final=final)
         except Exception as err:
             self._consecutive_failures += 1
             self._record_fire_failure(trigger, err)
@@ -339,7 +403,9 @@ class _EnteredCheckpointer:
             err,
         )
 
-    async def _fire_once(self, trigger: CheckpointTriggerKind) -> None:
+    async def _fire_once(
+        self, trigger: CheckpointTriggerKind, *, final: bool = False
+    ) -> None:
         # Phase 3 (in progress): writes placeholder host context, runs
         # restic backups (host + sandboxes in parallel), then writes
         # the per-checkpoint file.
@@ -441,9 +507,16 @@ class _EnteredCheckpointer:
             # event from the latest checkpoint file (working.md §8a).
             transcript()._event(CheckpointEvent.from_details(checkpoint))
 
+            # Record the committed id so __aexit__'s mark_solver_done
+            # can reference it.
+            self._last_fired_checkpoint_id = next_checkpoint_id
+
             # Checkpoint file is committed; open the next `checkpoint N+1`
-            # span so subsequent agent events nest under it.
-            await self._open_next_span()
+            # span so subsequent agent events nest under it. Skip on the
+            # harness-driven final fire — there is no more agent work to
+            # land in another span.
+            if not final:
+                await self._open_next_span()
 
     async def _write_host_context(
         self,

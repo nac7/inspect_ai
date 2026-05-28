@@ -19,7 +19,8 @@ Safe upload order — destination is valid at every intermediate state:
 3. ``restic/**/data/**`` (immutable, content-addressed)
 4. ``restic/**/index/**`` (immutable; occasional consolidation)
 5. ``restic/**/snapshots/**`` (references indexes / data)
-6. ``restic/restic-config.json`` (first cycle; password file)
+6. ``sample.json`` (manifest — first cycle, plus every fire that
+   updates ``solver_done``)
 7. ``ckpt-NNNNN.json`` last (commit point at the destination)
 
 Within each tier, files are shipped in lexicographic order. The
@@ -58,7 +59,7 @@ _EXCLUDED_TOP_LEVEL: frozenset[str] = frozenset({"context", MANIFEST_FILENAME})
 # to a catch-all bucket if none match (which shouldn't happen for
 # well-formed restic content).
 _CHECKPOINT_FILE_RE = re.compile(r"^ckpt-\d+\.json$")
-_RESTIC_CONFIG = "restic/restic-config.json"
+_SAMPLE_MANIFEST = "sample.json"
 
 
 def seed_manifest(staging_dir: str) -> int:
@@ -141,13 +142,13 @@ def _safe_order(files: list[str]) -> list[str]:
     data: list[str] = []
     index: list[str] = []
     snapshots: list[str] = []
-    restic_config: list[str] = []
+    sample_manifest: list[str] = []
     checkpoint_files: list[str] = []
     other: list[str] = []
     for f in files:
         parts = f.split("/")
-        if f == _RESTIC_CONFIG:
-            restic_config.append(f)
+        if f == _SAMPLE_MANIFEST:
+            sample_manifest.append(f)
         elif _CHECKPOINT_FILE_RE.match(parts[-1]):
             checkpoint_files.append(f)
         elif "data" in parts:
@@ -166,9 +167,29 @@ def _safe_order(files: list[str]) -> list[str]:
         + sorted(index)
         + sorted(snapshots)
         + sorted(other)
-        + sorted(restic_config)
+        + sorted(sample_manifest)
         + sorted(checkpoint_files)
     )
+
+
+async def ship_sample_manifest(*, staging_dir: str, destination_dir: str) -> None:
+    """Ship ``sample.json`` from staging to destination, out-of-band.
+
+    Used after :func:`mark_solver_done` updates the local manifest. The
+    normal egress diff would skip the file (it's already in
+    ``.egress-manifest.txt`` from the first fire), so the updated
+    content would never reach the destination. We ship directly here
+    instead — idempotent because the destination overwrites cleanly.
+
+    Ordering: this runs *after* the final fire's ``ckpt-NNNNN.json``
+    has already shipped, so the destination's ``sample.json`` flips to
+    ``solver_done`` set only when the underlying snapshot is durable.
+    """
+    src = Path(staging_dir) / _SAMPLE_MANIFEST
+    dst = f"{destination_dir}/{_SAMPLE_MANIFEST}"
+    await async_mkdir(_parent_of(dst))
+    with open(src, "rb") as f:
+        await get_async_filesystem().write_file_streaming(dst, f)
 
 
 def _parent_of(path: str) -> str:

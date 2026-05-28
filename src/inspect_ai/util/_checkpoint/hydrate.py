@@ -67,8 +67,8 @@ from ._host_egress import seed_manifest
 from ._layout import host_context
 from ._layout.eval_checkpoints_dir import eval_checkpoints_dir
 from ._layout.sample_checkpoints_dir import (
-    ensure_restic_config,
     ensure_sample_checkpoints_dir,
+    ensure_sample_manifest,
     scan_latest_committed_id,
 )
 from ._layout.schemas import Checkpoint
@@ -186,14 +186,16 @@ async def hydrate(
     sample_context_dir = await ensure_context_dir(sample_root)
 
     if resume_checkpoint:
-        # Bring the cross-cutting bits over first so `ensure_restic_config`
+        # Bring the cross-cutting bits over first so `ensure_sample_manifest`
         # reads the inherited password instead of minting a fresh one,
         # and so the checkpoint file count continues from the prior run.
+        # The FS-copied `sample.json` also carries `solver_done` forward
+        # automatically — subsequent scoring-phase retries still see it.
         await _fs_copy_cross_cutting(
             resume_checkpoint.sample_checkpoints_dir,
             sample_root,
         )
-    restic_config = await ensure_restic_config(sample_root)
+    manifest = await ensure_sample_manifest(sample_root)
     host_restic = await resolve_restic()
     host_repo = host_repo_dir(sample_root)
 
@@ -221,7 +223,7 @@ async def hydrate(
             resume=resume_checkpoint,
             host_restic=host_restic,
             host_repo=host_repo,
-            restic_password=restic_config.restic_password,
+            restic_password=manifest.restic_password,
             sample_root=sample_root,
             context_dir=sample_context_dir,
             latest_committed_id=latest_committed_id,
@@ -234,7 +236,7 @@ async def hydrate(
             _hydrate_sandboxes,
             resume_checkpoint,
             config.sandbox_paths or {},
-            restic_config.restic_password,
+            manifest.restic_password,
             sample_root,
             host_restic,
             latest_committed_id,
@@ -262,7 +264,7 @@ async def hydrate(
         context_dir=sample_context_dir,
         host_restic=host_restic,
         host_repo=host_repo,
-        restic_password=restic_config.restic_password,
+        restic_password=manifest.restic_password,
         host=host_result,
     )
 
@@ -423,28 +425,30 @@ async def _drop_orphan_snapshots(
 
 
 async def _fs_copy_cross_cutting(old_sample_dir: str, new_sample_dir: str) -> list[str]:
-    """Copy `restic-config.json` and `ckpt-*.json` from old to new sample dir.
+    """Copy `sample.json` and `ckpt-*.json` from old to new sample dir.
 
     Cross-cutting in the sense that neither belongs exclusively to the
     host or to any sandbox — they live at the top of the sample
-    checkpoints dir (the checkpoint files) and one level into
-    ``restic/`` (the config) alongside the per-domain repo subtrees.
+    checkpoints dir alongside the ``restic/`` per-domain repo subtrees.
 
     ``old_sample_dir`` may be local or remote (e.g. ``s3://``); the new
     sample dir is always local. Returns the list of paths written,
     relative to ``new_sample_dir``.
+
+    The ``sample.json`` manifest's ``solver_done`` field rides forward
+    automatically — subsequent scoring-phase retries still see it
+    without any extra handling here.
     """
     async_fs = get_async_filesystem()
     new = Path(new_sample_dir)
     written: list[str] = []
 
     with trace_action(logger, "Checkpoint Hydrate", "fs-copy cross-cutting"):
-        src_restic_config = f"{old_sample_dir}/restic/restic-config.json"
-        if await async_fs.exists(src_restic_config):
-            (new / "restic").mkdir(parents=True, exist_ok=True)
-            dst = new / "restic" / "restic-config.json"
-            await async_fs.get_file(src_restic_config, str(dst))
-            written.append("restic/restic-config.json")
+        src_manifest = f"{old_sample_dir}/sample.json"
+        if await async_fs.exists(src_manifest):
+            dst = new / "sample.json"
+            await async_fs.get_file(src_manifest, str(dst))
+            written.append("sample.json")
 
         async for uri in async_fs.iter_files(old_sample_dir, pattern="ckpt-*.json"):
             name = uri.rsplit("/", 1)[-1]

@@ -25,6 +25,7 @@ from inspect_ai.util._limit import (
 
 from ._background import background
 from ._checkpoint import (
+    Attempt,
     CheckpointConfig,
     CheckpointSampleConfig,
     CheckpointTrigger,
@@ -176,6 +177,7 @@ __all__ = [
     "ExecRemoteStreamingOptions",
     "ExecStderr",
     "ExecStdout",
+    "Attempt",
     "CheckpointConfig",
     "CheckpointSampleConfig",
     "CheckpointTrigger",

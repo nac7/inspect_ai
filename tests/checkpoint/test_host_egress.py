@@ -54,7 +54,7 @@ async def test_ships_new_files_and_writes_manifest(staging: Path, dest: Path) ->
     _write(staging / "restic" / "host" / "config", "host-config")
     _write(staging / "restic" / "host" / "keys" / "abc", "host-key")
     _write(staging / "restic" / "host" / "data" / "ab" / "cdef", "pack-data")
-    _write(staging / "restic" / "restic-config.json", '{"restic_password":"pwd"}')
+    _write(staging / "sample.json", '{"restic_password":"pwd"}')
     _write(staging / "ckpt-00001.json", '{"checkpoint_id":1}')
 
     await host_egress(staging_dir=str(staging), destination_dir=str(dest))
@@ -65,9 +65,7 @@ async def test_ships_new_files_and_writes_manifest(staging: Path, dest: Path) ->
     assert (
         dest / "restic" / "host" / "data" / "ab" / "cdef"
     ).read_text() == "pack-data"
-    assert (
-        dest / "restic" / "restic-config.json"
-    ).read_text() == '{"restic_password":"pwd"}'
+    assert (dest / "sample.json").read_text() == '{"restic_password":"pwd"}'
     assert (dest / "ckpt-00001.json").read_text() == '{"checkpoint_id":1}'
 
     # Manifest reflects shipment
@@ -76,7 +74,7 @@ async def test_ships_new_files_and_writes_manifest(staging: Path, dest: Path) ->
         "restic/host/config",
         "restic/host/keys/abc",
         "restic/host/data/ab/cdef",
-        "restic/restic-config.json",
+        "sample.json",
         "ckpt-00001.json",
     }
 
@@ -133,10 +131,10 @@ def test_safe_order_ships_checkpoint_file_last() -> None:
         "restic/host/index/ef",
         "restic/host/config",
         "restic/host/keys/key1",
-        "restic/restic-config.json",
+        "sample.json",
     ]
     ordered = _safe_order(files)
-    # config + keys → data → index → snapshots → restic-config.json → checkpoint file
+    # config + keys → data → index → snapshots → sample.json → checkpoint file
     assert ordered.index("restic/host/config") < ordered.index("restic/host/data/ab/cd")
     assert ordered.index("restic/host/keys/key1") < ordered.index(
         "restic/host/data/ab/cd"
@@ -147,10 +145,8 @@ def test_safe_order_ships_checkpoint_file_last() -> None:
     assert ordered.index("restic/host/index/ef") < ordered.index(
         "restic/host/snapshots/abc"
     )
-    assert ordered.index("restic/host/snapshots/abc") < ordered.index(
-        "restic/restic-config.json"
-    )
-    assert ordered.index("restic/restic-config.json") < ordered.index("ckpt-00001.json")
+    assert ordered.index("restic/host/snapshots/abc") < ordered.index("sample.json")
+    assert ordered.index("sample.json") < ordered.index("ckpt-00001.json")
 
 
 def test_safe_order_checkpoint_file_last_across_multiple() -> None:

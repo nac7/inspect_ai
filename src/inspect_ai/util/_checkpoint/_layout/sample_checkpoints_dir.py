@@ -3,12 +3,12 @@
 Each ``(sample, epoch[, retry])`` attempt gets its own sample
 checkpoints dir under the eval checkpoints dir. The dir holds:
 
+- ``sample.json`` — per-sample manifest carrying the restic password
+  and an optional ``solver_done`` marker.
 - ``ckpt-NNNNN.json`` — one plaintext checkpoint file per fired
   checkpoint; the index into the host + sandbox restic repos.
-- ``restic/`` — restic state subdir, containing
-  ``restic-config.json`` (per-sample restic password),
-  ``host/`` (host restic repo), and
-  ``sandboxes/<name>/`` (per-sandbox restic repos).
+- ``restic/`` — restic state subdir, containing ``host/`` (host restic
+  repo) and ``sandboxes/<name>/`` (per-sandbox restic repos).
 - ``context/`` — restic backup source (host context JSON files).
 
 See ``design/plans/checkpointing-working.md`` §1 and
@@ -22,6 +22,7 @@ The optional ``_<retry>`` suffix on the dir name is omitted until
 from __future__ import annotations
 
 import secrets
+from datetime import datetime, timezone
 from typing import TypeVar
 
 from pydantic import BaseModel
@@ -29,8 +30,8 @@ from pydantic import BaseModel
 from inspect_ai._util.asyncfiles import get_async_filesystem
 
 from .._async_fs import async_mkdir
-from .schemas import Checkpoint, ResticConfig
-from .staging_dir import restic_config_path, restic_dir
+from .schemas import Checkpoint, SampleManifest, SolverDone
+from .staging_dir import sample_manifest_path
 
 _M = TypeVar("_M", bound=BaseModel)
 
@@ -69,29 +70,52 @@ async def ensure_sample_checkpoints_dir(
     return sample_dir
 
 
-async def ensure_restic_config(sample_root: str) -> ResticConfig:
-    """Ensure ``<sample_root>/restic/restic-config.json`` exists; return its contents.
+async def ensure_sample_manifest(sample_root: str) -> SampleManifest:
+    """Ensure ``<sample_root>/sample.json`` exists; return its contents.
 
-    Mints a fresh restic password and writes the file on first call.
+    Mints a fresh restic password and writes the manifest on first call.
     Subsequent calls read and return the existing file. Idempotent
     across concurrent samples (different sample roots) — there is no
     cross-sample race.
-
-    Also ensures the ``restic/`` subdir exists, since restic-config.json
-    is the first file written into it.
     """
-    path = restic_config_path(sample_root)
+    path = sample_manifest_path(sample_root)
     if await get_async_filesystem().exists(path):
-        return await _load_model_json(path, ResticConfig)
-    await async_mkdir(restic_dir(sample_root))
-    config = ResticConfig(restic_password=secrets.token_urlsafe(32))
-    await _write_model_json(path, config)
-    return config
+        return await _load_model_json(path, SampleManifest)
+    manifest = SampleManifest(restic_password=secrets.token_urlsafe(32))
+    await _write_model_json(path, manifest)
+    return manifest
 
 
-async def _read_restic_config(sample_root: str) -> ResticConfig:
-    """Read ``<sample_root>/restic/restic-config.json``. Caller must have ensured it exists."""
-    return await _load_model_json(restic_config_path(sample_root), ResticConfig)
+async def read_sample_manifest(sample_root: str) -> SampleManifest:
+    """Read ``<sample_root>/sample.json``. Caller must have ensured it exists."""
+    return await _load_model_json(sample_manifest_path(sample_root), SampleManifest)
+
+
+async def read_sample_manifest_if_present(
+    sample_root: str,
+) -> SampleManifest | None:
+    """Read ``<sample_root>/sample.json`` if it exists; ``None`` otherwise."""
+    path = sample_manifest_path(sample_root)
+    if not await get_async_filesystem().exists(path):
+        return None
+    return await _load_model_json(path, SampleManifest)
+
+
+async def mark_solver_done(sample_root: str, checkpoint_id: int) -> None:
+    """Set ``solver_done`` on ``<sample_root>/sample.json``.
+
+    Reads the existing manifest, updates the ``solver_done`` field with
+    a fresh :class:`SolverDone`, and rewrites the file. Presence of
+    ``solver_done`` on disk is the scoring-phase resume signal — read
+    by ``eval_log_sample_source`` to tag
+    ``ResumeCheckpoint.attempt = RETRY_FOR_SCORING``.
+    """
+    manifest = await read_sample_manifest(sample_root)
+    manifest.solver_done = SolverDone(
+        checkpoint_id=checkpoint_id,
+        created_at=datetime.now(timezone.utc),
+    )
+    await _write_model_json(sample_manifest_path(sample_root), manifest)
 
 
 async def scan_latest_committed_id(sample_checkpoints_dir: str) -> int | None:

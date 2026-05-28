@@ -1,7 +1,7 @@
 """Pydantic models for the on-disk checkpoint layout.
 
-Defines the shape of the per-sample ``restic/restic-config.json`` and
-the per-checkpoint ``ckpt-NNNNN.json`` checkpoint files. See
+Defines the shape of the per-sample ``sample.json`` manifest and the
+per-checkpoint ``ckpt-NNNNN.json`` checkpoint files. See
 ``design/plans/checkpointing-working.md`` §1 for the full layout
 description. These are pure data types — read/write helpers live with
 the Phase 3 write code.
@@ -72,14 +72,38 @@ class Checkpoint(BaseModel):
     host-only."""
 
 
-class ResticConfig(BaseModel):
-    """Per-sample restic config file (``<sample-root>/restic/restic-config.json``).
+class SolverDone(BaseModel):
+    """Marker that the solver/agent finished and scoring is the next thing.
 
-    Lives alongside the per-sample restic repos under ``restic/``.
-    Written once at first checkpoint setup for a sample; never
-    rewritten. Preserved across retries of the same sample via the FS
-    copy at resume — so the same password unlocks the FS-copied
-    ``host/`` and ``sandboxes/<name>/`` repos in the new sample dir.
+    Set on :class:`SampleManifest` by ``_CheckpointerSetup.__aexit__``
+    after a successful final fire on clean agent exit. Its presence on
+    the on-disk manifest is the "skip the agent loop on retry" signal —
+    the sample source reads it and tags
+    :class:`ResumeCheckpoint.attempt` as
+    :attr:`Attempt.RETRY_FOR_SCORING`.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    checkpoint_id: int
+    """Ordinal of the final checkpoint this marker rides on top of."""
+
+    created_at: datetime
+    """When the agent returned and the marker was written."""
+
+
+class SampleManifest(BaseModel):
+    """Per-sample manifest file (``<sample-root>/sample.json``).
+
+    Single per-sample state file that carries everything the sample's
+    checkpoint subtree needs in addition to the restic repos themselves:
+    the restic password (written once at first checkpoint setup) and an
+    optional :class:`SolverDone` marker (written on clean agent exit).
+
+    Preserved across retries of the same sample via the FS copy at
+    resume — so the same password unlocks the FS-copied ``host/`` and
+    ``sandboxes/<name>/`` repos, and ``solver_done`` rides forward
+    automatically.
     """
 
     model_config = ConfigDict(extra="allow")
@@ -88,3 +112,7 @@ class ResticConfig(BaseModel):
     """Password used by every repo (host + each sandbox) under this
     sample. See ``design/plans/checkpointing-hydration.md`` for how it
     reaches sandbox-side restic without being persisted in the sandbox."""
+
+    solver_done: SolverDone | None = None
+    """Present iff the agent completed cleanly and the harness-driven
+    final fire succeeded. Drives scoring-phase resume."""

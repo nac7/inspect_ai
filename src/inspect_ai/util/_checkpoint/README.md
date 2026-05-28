@@ -214,7 +214,18 @@ On resume, the following is restored before the agent runs:
 -   **Messages, events, store, attachments.** Inspect's internal per-sample state is rehydrated. The rehydrated events appear under a synthesized `prior_run` span in the new `.eval` log.
 -   **Agent-tracked state.** Any values the agent registered with `cp.track(...)` (see below).
 
-The agent can read `cp.is_resuming` to discover that this is a resumed run and optionally skip one-shot setup that has already happened.
+The agent can read `cp.attempt` to discover whether this is a fresh run, a resume, or a scoring-phase resume (see [Scoring-Phase Resume](#scoring-phase-resume) below).
+
+### Scoring-Phase Resume
+
+When the agent completes cleanly but a later phase crashes (typically scoring), retry can skip the agent entirely and re-run scoring against the agent's final state. The mechanism is automatic:
+
+1.  On clean agent exit, Inspect fires a final "agent_complete" checkpoint and marks `solver_done` on the per-sample `sample.json` manifest.
+2.  If anything crashes after that (a scorer, the eval process), the next `inspect eval retry` reads the marker and tags the sample as `Attempt.RETRY_FOR_SCORING`.
+3.  The agent enters its checkpointer session, restores tracked state (messages, output, …), reads `cp.attempt == Attempt.RETRY_FOR_SCORING`, and returns immediately — no model calls, no tool calls.
+4.  Scoring runs against the restored state.
+
+The built-in React agent handles this automatically. Custom agents that don't add the `Attempt.RETRY_FOR_SCORING` branch will re-run their loop on retry (graceful degradation).
 
 ## Custom Agents
 
@@ -223,7 +234,7 @@ A custom agent participates in checkpointing by entering a `Checkpointer()` sess
 The key affordance is **`cp.track`**, which gives the agent a single-call way to declare "this variable is important state — capture it at each checkpoint and restore it for me on retry." On a fresh run, `track` returns the `initial_value` the agent passes in. On a retry of the same sample, `track` returns whatever the registered callback captured at the most recent checkpoint of the prior run — so the agent's important state comes back automatically and the agent picks up where it left off, without any custom save/load code:
 
 ``` python
-from inspect_ai.util import checkpointer
+from inspect_ai.util import Attempt, checkpointer
 
 async def my_agent(state):
     async with checkpointer() as cp:
@@ -242,8 +253,15 @@ async def my_agent(state):
             state.messages,
         )
 
-        # On resume, skip one-shot setup that has already happened.
-        if not cp.is_resuming:
+        # Scoring-phase resume: agent already finished in the prior
+        # attempt — tracked state is restored above, return so scoring
+        # can re-run without redoing the loop.
+        if cp.attempt == Attempt.RETRY_FOR_SCORING:
+            return state
+
+        # On a fresh start, perform one-shot setup. (On a mid-agent
+        # retry the prior run already did this, so skip.)
+        if cp.attempt == Attempt.INITIAL:
             initialize_workspace(state)
 
         while not done(state):
@@ -258,14 +276,14 @@ The `Checkpointer` surface:
 
 | Member | Description |
 |----|----|
-| `cp.is_resuming` | `True` iff this sample is being resumed from a prior checkpoint. Stable for the lifetime of the session. |
+| `cp.attempt` | Enum: `Attempt.INITIAL` (fresh), `Attempt.RETRY` (mid-agent resume), or `Attempt.RETRY_FOR_SCORING` (agent completed in the prior attempt — restore tracked state and return). Stable for the lifetime of the session. |
 | `await cp.tick()` | Turn-boundary signal; may fire a checkpoint depending on the trigger. |
 | `await cp.checkpoint()` | Force a fire regardless of trigger (used by `Manual()`). |
 | `cp.track(key, callback, initial_value, *, value_type=None)` | Declare a piece of agent state worth persisting. `callback` is invoked at every checkpoint fire to capture the current value; the method returns the value captured at the most recent prior checkpoint on a retry, or `initial_value` on a fresh run. Each `key` may be tracked only once per session. |
 
 `cp.track` is generic over the value type. Single Pydantic models and JSON primitives are auto-handled; for other shapes (collections, generics, dataclasses, lists of models) pass `value_type=...`.
 
-When no `CheckpointConfig` is installed (checkpointing disabled), the session is a no-op: `tick()` does nothing, `track()` always returns `initial_value`, `is_resuming` is `False`.
+When no `CheckpointConfig` is installed (checkpointing disabled), the session is a no-op: `tick()` does nothing, `track()` always returns `initial_value`, `attempt` is `Attempt.INITIAL`.
 
 ## Details and Limitations
 

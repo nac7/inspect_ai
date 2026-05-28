@@ -1,4 +1,4 @@
-"""Tests for the sample checkpoints dir, restic-config.json, and checkpoint file writes."""
+"""Tests for the sample checkpoints dir, sample.json, and checkpoint file writes."""
 
 from __future__ import annotations
 
@@ -7,15 +7,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from inspect_ai.util._checkpoint._layout.sample_checkpoints_dir import (
-    _read_restic_config,
-    ensure_restic_config,
     ensure_sample_checkpoints_dir,
+    ensure_sample_manifest,
+    mark_solver_done,
+    read_sample_manifest,
+    read_sample_manifest_if_present,
     sample_checkpoints_dir,
     write_checkpoint_file,
 )
 from inspect_ai.util._checkpoint._layout.schemas import (
     Checkpoint,
-    ResticConfig,
+    SampleManifest,
     SnapshotDetails,
 )
 from inspect_ai.util._checkpoint._triggers import CheckpointTriggerKind
@@ -86,52 +88,75 @@ async def test_ensure_creates_parent_eval_dir(tmp_path: Path) -> None:
     assert Path(eval_dir).is_dir()
 
 
-async def test_ensure_restic_config_mints_password_on_first_call(
+async def test_ensure_sample_manifest_mints_password_on_first_call(
     tmp_path: Path,
 ) -> None:
     eval_dir = str(tmp_path / "foo.checkpoints")
     sample_dir = await ensure_sample_checkpoints_dir(eval_dir, "s1", 0)
-    sample = await ensure_restic_config(sample_dir)
-    assert sample.restic_password
-    assert (Path(sample_dir) / "restic" / "restic-config.json").is_file()
+    manifest = await ensure_sample_manifest(sample_dir)
+    assert manifest.restic_password
+    assert manifest.solver_done is None
+    assert (Path(sample_dir) / "sample.json").is_file()
 
 
-async def test_ensure_restic_config_preserves_password_on_second_call(
+async def test_ensure_sample_manifest_preserves_password_on_second_call(
     tmp_path: Path,
 ) -> None:
     eval_dir = str(tmp_path / "foo.checkpoints")
     sample_dir = await ensure_sample_checkpoints_dir(eval_dir, "s1", 0)
-    first = await ensure_restic_config(sample_dir)
-    second = await ensure_restic_config(sample_dir)
+    first = await ensure_sample_manifest(sample_dir)
+    second = await ensure_sample_manifest(sample_dir)
     assert first.restic_password == second.restic_password
 
 
-async def test_ensure_restic_config_different_samples_get_distinct_passwords(
+async def test_ensure_sample_manifest_different_samples_get_distinct_passwords(
     tmp_path: Path,
 ) -> None:
     eval_dir = str(tmp_path / "foo.checkpoints")
     a_dir = await ensure_sample_checkpoints_dir(eval_dir, "s1", 0)
     b_dir = await ensure_sample_checkpoints_dir(eval_dir, "s2", 0)
-    a = await ensure_restic_config(a_dir)
-    b = await ensure_restic_config(b_dir)
+    a = await ensure_sample_manifest(a_dir)
+    b = await ensure_sample_manifest(b_dir)
     assert a.restic_password != b.restic_password
 
 
-async def test_read_restic_config_returns_written_value(tmp_path: Path) -> None:
+async def test_read_sample_manifest_returns_written_value(tmp_path: Path) -> None:
     eval_dir = str(tmp_path / "foo.checkpoints")
     sample_dir = await ensure_sample_checkpoints_dir(eval_dir, "s1", 0)
-    written = await ensure_restic_config(sample_dir)
-    read = await _read_restic_config(sample_dir)
+    written = await ensure_sample_manifest(sample_dir)
+    read = await read_sample_manifest(sample_dir)
     assert read.restic_password == written.restic_password
 
 
-async def test_restic_config_round_trip_pydantic(tmp_path: Path) -> None:
+async def test_sample_manifest_round_trip_pydantic(tmp_path: Path) -> None:
     eval_dir = str(tmp_path / "foo.checkpoints")
     sample_dir = await ensure_sample_checkpoints_dir(eval_dir, "s1", 0)
-    await ensure_restic_config(sample_dir)
-    raw = (Path(sample_dir) / "restic" / "restic-config.json").read_text()
-    parsed = ResticConfig.model_validate_json(raw)
+    await ensure_sample_manifest(sample_dir)
+    raw = (Path(sample_dir) / "sample.json").read_text()
+    parsed = SampleManifest.model_validate_json(raw)
     assert parsed.restic_password
+
+
+async def test_read_sample_manifest_if_present_returns_none_when_missing(
+    tmp_path: Path,
+) -> None:
+    eval_dir = str(tmp_path / "foo.checkpoints")
+    sample_dir = await ensure_sample_checkpoints_dir(eval_dir, "s1", 0)
+    assert await read_sample_manifest_if_present(sample_dir) is None
+
+
+async def test_mark_solver_done_sets_field_and_preserves_password(
+    tmp_path: Path,
+) -> None:
+    eval_dir = str(tmp_path / "foo.checkpoints")
+    sample_dir = await ensure_sample_checkpoints_dir(eval_dir, "s1", 0)
+    original = await ensure_sample_manifest(sample_dir)
+    await mark_solver_done(sample_dir, checkpoint_id=7)
+    updated = await read_sample_manifest(sample_dir)
+    assert updated.restic_password == original.restic_password
+    assert updated.solver_done is not None
+    assert updated.solver_done.checkpoint_id == 7
+    assert updated.solver_done.created_at.tzinfo is not None
 
 
 async def test_write_checkpoint_file_returns_zero_padded_path(tmp_path: Path) -> None:

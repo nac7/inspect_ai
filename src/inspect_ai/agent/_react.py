@@ -26,7 +26,7 @@ from inspect_ai.tool._mcp.connection import mcp_connection
 from inspect_ai.tool._tool import Tool, ToolResult, ToolSource, tool
 from inspect_ai.tool._tool_def import ToolDef
 from inspect_ai.tool._tool_info import parse_tool_info
-from inspect_ai.util._checkpoint import checkpointer
+from inspect_ai.util._checkpoint import Attempt, checkpointer
 
 from ._agent import Agent, AgentState, agent, agent_with, is_agent
 from ._channel import (
@@ -207,6 +207,19 @@ def react(
                 state.messages,
                 value_type=list[ChatMessage],
             )
+
+            # track output (restored to prior value on resume — drives
+            # scoring on RETRY_FOR_SCORING since state.output's lazy
+            # synthesis from messages can diverge from what the loop
+            # actually computed, e.g. post-submit completion edits).
+            state.output = cp.track("output", lambda: state.output, state.output)
+
+            # Scoring-phase resume: the prior attempt's agent loop ran
+            # to clean exit and the harness will run scoring next. State
+            # is fully restored above; return immediately so scoring can
+            # re-run without re-doing the agent's work.
+            if cp.attempt == Attempt.RETRY_FOR_SCORING:
+                return state
 
             # resolve overflow handling
             overflow = _resolve_overflow(truncation)
@@ -409,6 +422,17 @@ def react_no_submit(
                 state.messages,
                 value_type=list[ChatMessage],
             )
+
+            # track output (restored to prior value on resume — see
+            # ``react()`` for rationale).
+            state.output = cp.track("output", lambda: state.output, state.output)
+
+            # Scoring-phase resume: the prior attempt's agent loop ran
+            # to clean exit and the harness will run scoring next. State
+            # is fully restored above; return immediately so scoring can
+            # re-run without re-doing the agent's work.
+            if cp.attempt == Attempt.RETRY_FOR_SCORING:
+                return state
 
             # resolve overflow handling
             overflow = _resolve_overflow(truncation)

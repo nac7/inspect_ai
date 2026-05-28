@@ -116,7 +116,10 @@ from inspect_ai.util._checkpoint._layout import (
     has_sample_checkpoint,
     sample_checkpoints_dir,
 )
-from inspect_ai.util._checkpoint.checkpointer import ResumeCheckpoint
+from inspect_ai.util._checkpoint._layout.sample_checkpoints_dir import (
+    read_sample_manifest_if_present,
+)
+from inspect_ai.util._checkpoint.checkpointer import Attempt, ResumeCheckpoint
 from inspect_ai.util._checkpoint.config import (
     CheckpointConfig,
     merge_checkpoint_configs,
@@ -517,7 +520,8 @@ async def task_run(options: TaskRunOptions, task_cancel: TaskCancel | None) -> E
                             return sample_scores
                         elif isinstance(previous_sample, ResumeCheckpoint):
                             # signal intent — agent code can branch on
-                            # `cp.is_resuming`. No state hydration yet.
+                            # `cp.attempt`. Hydration runs inside
+                            # `_CheckpointerSetup.__aenter__`.
                             resume_checkpoint = previous_sample
 
                     # factory to create sample+state lazily (after semaphore)
@@ -1619,10 +1623,19 @@ def eval_log_sample_source(
             return None
         if not await has_sample_checkpoint(eval_checkpoints_dir, id, epoch):
             return None
+        prior_sample_dir = sample_checkpoints_dir(eval_checkpoints_dir, id, epoch)
+        # Presence of ``solver_done`` on the prior attempt's manifest =
+        # agent finished cleanly, scoring is the next thing → retry can
+        # skip the agent loop (see ``Attempt.RETRY_FOR_SCORING``).
+        manifest = await read_sample_manifest_if_present(prior_sample_dir)
+        attempt = (
+            Attempt.RETRY_FOR_SCORING
+            if manifest is not None and manifest.solver_done is not None
+            else Attempt.RETRY
+        )
         return ResumeCheckpoint(
-            sample_checkpoints_dir=sample_checkpoints_dir(
-                eval_checkpoints_dir, id, epoch
-            )
+            sample_checkpoints_dir=prior_sample_dir,
+            attempt=attempt,
         )
 
     # take care of no log or no samples in log. Note we still proceed when

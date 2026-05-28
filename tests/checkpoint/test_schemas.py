@@ -1,7 +1,7 @@
 """Tests for the on-disk layout types.
 
 Pure data types: `Checkpoint` (per-checkpoint `ckpt-NNNNN.json`)
-and `ResticConfig` (per-sample `restic/restic-config.json`).
+and `SampleManifest` (per-sample `sample.json`).
 Verifies the contract: required fields, validation strictness on
 triggers, JSON round-trip, and ``extra="allow"`` forward-compat.
 """
@@ -14,7 +14,11 @@ from datetime import datetime, timezone
 import pytest
 from pydantic import ValidationError
 
-from inspect_ai.util._checkpoint._layout.schemas import Checkpoint, ResticConfig
+from inspect_ai.util._checkpoint._layout.schemas import (
+    Checkpoint,
+    SampleManifest,
+    SolverDone,
+)
 
 
 def _info(
@@ -99,24 +103,44 @@ def test_checkpoint_empty_sandboxes_is_valid() -> None:
     assert checkpoint.sandboxes == {}
 
 
-# --- ResticConfig -----------------------------------------------------
+# --- SampleManifest ---------------------------------------------------
 
 
-def test_sample_basic_round_trip() -> None:
-    sample = ResticConfig.model_validate(_BASE_SAMPLE)
-    assert sample.restic_password == "s3cr3t"
+def test_manifest_basic_round_trip() -> None:
+    manifest = SampleManifest.model_validate(_BASE_SAMPLE)
+    assert manifest.restic_password == "s3cr3t"
+    assert manifest.solver_done is None
 
-    rehydrated = ResticConfig.model_validate_json(sample.model_dump_json())
-    assert rehydrated == sample
+    rehydrated = SampleManifest.model_validate_json(manifest.model_dump_json())
+    assert rehydrated == manifest
 
 
-def test_sample_requires_password() -> None:
+def test_manifest_requires_password() -> None:
     with pytest.raises(ValidationError):
-        ResticConfig.model_validate({})
+        SampleManifest.model_validate({})
 
 
-def test_sample_extra_fields_preserved_round_trip() -> None:
+def test_manifest_extra_fields_preserved_round_trip() -> None:
     payload = {**_BASE_SAMPLE, "future_field": "later"}
-    sample = ResticConfig.model_validate(payload)
-    dumped = json.loads(sample.model_dump_json())
+    manifest = SampleManifest.model_validate(payload)
+    dumped = json.loads(manifest.model_dump_json())
     assert dumped["future_field"] == "later"
+
+
+def test_manifest_with_solver_done() -> None:
+    payload = {
+        **_BASE_SAMPLE,
+        "solver_done": {
+            "checkpoint_id": 7,
+            "created_at": "2026-04-26T14:23:11Z",
+        },
+    }
+    manifest = SampleManifest.model_validate(payload)
+    assert isinstance(manifest.solver_done, SolverDone)
+    assert manifest.solver_done.checkpoint_id == 7
+    assert manifest.solver_done.created_at == datetime(
+        2026, 4, 26, 14, 23, 11, tzinfo=timezone.utc
+    )
+
+    rehydrated = SampleManifest.model_validate_json(manifest.model_dump_json())
+    assert rehydrated == manifest
