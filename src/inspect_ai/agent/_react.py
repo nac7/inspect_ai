@@ -207,11 +207,6 @@ def react(
                 state.messages,
                 value_type=list[ChatMessage],
             )
-
-            # track output (restored to prior value on resume — drives
-            # scoring on RETRY_FOR_SCORING since state.output's lazy
-            # synthesis from messages can diverge from what the loop
-            # actually computed, e.g. post-submit completion edits).
             state.output = cp.track("output", lambda: state.output, state.output)
 
             # Scoring-phase resume: the prior attempt's agent loop ran
@@ -415,6 +410,12 @@ def react_no_submit(
             if system_message:
                 state.messages.insert(0, system_message)
 
+            # TODO: It would be nice if we could just .track("state", lambda: state,
+            # state). The problem is that AgentState is not a Pydantic BaseModel
+            # (which is required by .track). We could add custom support for serializing/deserializing
+            # AgentState's, but the checkpoint code is layered below AgentState.
+            # So for now, we just track two items.
+
             # track conversation messages (restored to prior value on resume)
             state.messages = cp.track(
                 "messages",
@@ -422,9 +423,6 @@ def react_no_submit(
                 state.messages,
                 value_type=list[ChatMessage],
             )
-
-            # track output (restored to prior value on resume — see
-            # ``react()`` for rationale).
             state.output = cp.track("output", lambda: state.output, state.output)
 
             # Scoring-phase resume: the prior attempt's agent loop ran
