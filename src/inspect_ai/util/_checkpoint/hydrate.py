@@ -196,6 +196,12 @@ async def hydrate(
             sample_root,
         )
     manifest = await ensure_sample_manifest(sample_root)
+    if resume_checkpoint:
+        _debug(
+            f"[scoring-resume] hydrate: attempt={resume_checkpoint.attempt.value} "
+            f"sample={sample_id} epoch={epoch} — manifest copied into "
+            f"sample_root, solver_done={manifest.solver_done}"
+        )
     host_restic = await resolve_restic()
     host_repo = host_repo_dir(sample_root)
 

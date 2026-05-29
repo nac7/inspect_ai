@@ -119,6 +119,7 @@ from inspect_ai.util._checkpoint._layout import (
 from inspect_ai.util._checkpoint._layout.sample_checkpoints_dir import (
     read_sample_manifest_if_present,
 )
+from inspect_ai.util._checkpoint._logging import debug as _ckpt_debug
 from inspect_ai.util._checkpoint.checkpointer import Attempt, ResumeCheckpoint
 from inspect_ai.util._checkpoint.config import (
     CheckpointConfig,
@@ -1632,6 +1633,12 @@ def eval_log_sample_source(
             Attempt.RETRY_FOR_SCORING
             if manifest is not None and manifest.solver_done is not None
             else Attempt.RETRY
+        )
+        _ckpt_debug(
+            f"[scoring-resume] sample={id} epoch={epoch}: "
+            f"manifest={'present' if manifest is not None else 'MISSING'} "
+            f"solver_done={manifest.solver_done if manifest is not None else None} "
+            f"-> attempt={attempt.value} (dir={prior_sample_dir})"
         )
         return ResumeCheckpoint(
             sample_checkpoints_dir=prior_sample_dir,

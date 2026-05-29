@@ -200,7 +200,7 @@ if __name__ == "__main__":
 
     # Default log: a known-incomplete-with-sidecars cp_ctf run captured
     # for local debugging. Override by passing a log path as argv[1].
-    DEFAULT_LOG = "logs/2026-05-27T13-12-16-00-00_cp-ctf_BwXJKGp4xBy6XNMcby9AAd.eval"
+    DEFAULT_LOG = "logs/2026-05-29T14-12-32-00-00_cp-ctf_5tQHovYkUTezLyUr6iuLvh.eval"
     log_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_LOG
 
     print(f"Retrying {log_path}")

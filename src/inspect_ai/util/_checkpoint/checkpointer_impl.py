@@ -50,6 +50,7 @@ from ._layout.sample_checkpoints_dir import (
 )
 from ._layout.schemas import Checkpoint, SnapshotDetails
 from ._layout.staging_dir import sandbox_repo_dir
+from ._logging import debug as _ckpt_debug
 from ._sandbox_restic import egress_sandbox, run_sandbox_backup
 from ._triggers import CheckpointTriggerKind, create_trigger
 from .checkpointer import (
@@ -152,6 +153,13 @@ class _CheckpointerSetup(AbstractAsyncContextManager[Checkpointer]):
             or self._cached.attempt == Attempt.RETRY_FOR_SCORING
             or self._finalized
         ):
+            _ckpt_debug(
+                "[scoring-resume] __aexit__: NOT finalizing — "
+                f"entered={self._cached is not None} "
+                f"exc={exc_type.__name__ if exc_type is not None else None} "
+                f"attempt={self._cached.attempt.value if self._cached is not None else None} "
+                f"already_finalized={self._finalized}"
+            )
             return
         self._finalized = True
         cp = self._cached
@@ -162,7 +170,17 @@ class _CheckpointerSetup(AbstractAsyncContextManager[Checkpointer]):
         # and the latest snapshot doesn't reflect the agent's final
         # state, so we don't want scoring-phase resume on retry.
         if cp._consecutive_failures != 0:
+            _ckpt_debug(
+                "[scoring-resume] __aexit__: final 'agent_complete' fire had "
+                f"{cp._consecutive_failures} consecutive failure(s) — "
+                "NOT marking solver_done (retry will be plain RETRY)"
+            )
             return
+        _ckpt_debug(
+            "[scoring-resume] __aexit__: solver finished cleanly — marking "
+            f"solver_done at checkpoint_id={cp._last_fired_checkpoint_id} "
+            f"(sample_root={cp._sample_root})"
+        )
         await mark_solver_done(cp._sample_root, cp._last_fired_checkpoint_id)
         if cp._sample_staging_dir is not None:
             # Remote destination: the updated sample.json is already in

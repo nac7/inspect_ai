@@ -27,6 +27,7 @@ from inspect_ai.tool._tool import Tool, ToolResult, ToolSource, tool
 from inspect_ai.tool._tool_def import ToolDef
 from inspect_ai.tool._tool_info import parse_tool_info
 from inspect_ai.util._checkpoint import Attempt, checkpointer
+from inspect_ai.util._checkpoint._logging import debug as _ckpt_debug
 
 from ._agent import Agent, AgentState, agent, agent_with, is_agent
 from ._channel import (
@@ -214,6 +215,12 @@ def react(
             # is fully restored above; return immediately so scoring can
             # re-run without re-doing the agent's work.
             if cp.attempt == Attempt.RETRY_FOR_SCORING:
+                _ckpt_debug(
+                    f"[scoring-resume] react agent: attempt={cp.attempt.value}, "
+                    f"taking fast-path return (skipping agent loop). restored: "
+                    f"messages={len(state.messages)} "
+                    f"output.completion={state.output.completion[:60]!r}"
+                )
                 return state
 
             # resolve overflow handling
@@ -430,6 +437,12 @@ def react_no_submit(
             # is fully restored above; return immediately so scoring can
             # re-run without re-doing the agent's work.
             if cp.attempt == Attempt.RETRY_FOR_SCORING:
+                _ckpt_debug(
+                    f"[scoring-resume] react agent: attempt={cp.attempt.value}, "
+                    f"taking fast-path return (skipping agent loop). restored: "
+                    f"messages={len(state.messages)} "
+                    f"output.completion={state.output.completion[:60]!r}"
+                )
                 return state
 
             # resolve overflow handling
