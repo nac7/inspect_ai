@@ -1085,6 +1085,10 @@ class AnthropicAPI(ModelAPI):
     def supports_mid_conversation_system(self) -> bool:
         if self.is_bedrock() or self.is_vertex():
             return False
+        # mythos-preview matches is_claude_latest() but rejects role:"system"
+        # in messages with a 400; route it through the <system-reminder> path.
+        if "mythos" in self.service_model_name():
+            return False
         return self.is_claude_4_8_or_later()
 
     # https://platform.claude.com/docs/en/build-with-claude/cache-diagnostics
