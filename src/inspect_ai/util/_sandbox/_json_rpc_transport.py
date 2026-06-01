@@ -15,6 +15,15 @@ if TYPE_CHECKING:
     from .environment import SandboxEnvironment
 
 
+SERVER_SOCKET = "/tmp/sandbox-tools/sandbox-tools.sock"
+
+# Tools handled in-process by ``inspect-sandbox-tools exec`` (not by the
+# server). All other methods are forwarded to the server's unix-socket HTTP
+# endpoint, so we can skip the ~50MB PyInstaller decompress and call the
+# socket directly via curl.
+_IN_PROCESS_METHODS = frozenset({"text_editor", "version"})
+
+
 class SandboxJSONRPCTransport(JSONRPCTransport):
     """A transport that uses a sandbox for RPC communication.
 
@@ -57,8 +66,12 @@ class SandboxJSONRPCTransport(JSONRPCTransport):
         Raises:
             RuntimeError: If the sandbox execution fails.
         """
+        if method in _IN_PROCESS_METHODS:
+            cmd = [self.cli, "exec"]
+        else:
+            cmd = ["curl", "-sSf", "--unix-socket", SERVER_SOCKET, "-d", "@-", "http://localhost/"]
         exec_result = await self.sandbox.exec(
-            [self.cli, "exec"],
+            cmd,
             input=create_json_rpc_request(method, params, is_notification),
             timeout=transport_extra_args.get("timeout", None),
             timeout_retry=transport_extra_args.get("timeout_retry", True),
